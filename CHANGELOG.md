@@ -4,7 +4,20 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 ## Unreleased
 
-No additional changes yet.
+### Fixes
+
+- **Sub-threshold replay cleanup no longer forces a full compaction.** When
+  ingest rewrote provider-visible messages into durable refs (externalization
+  stub, sensitive redaction, active-replay placeholder) and the session was
+  still far below the context threshold, preflight fell through to the
+  leaf-compaction loop and spent summarizer calls on a rewrite that was already
+  durable and deterministic. The cleanup-only path was gated solely on an
+  active compression-boundary cooldown, so the normal case — no boundary skip —
+  took the expensive path. It is now taken whenever the turn is provably below
+  a known threshold (and not in forced overflow); an unknown window
+  (`threshold_tokens == 0`) still falls through to normal compaction.
+  Renamed the one-shot handoff flag `_preflight_cleanup_only_due_to_boundary_cooldown`
+  to `_preflight_cleanup_only` to match what it now means.
 
 ## v1.0.0-rc.1 - 2026-09-03
 

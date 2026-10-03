@@ -390,7 +390,7 @@ def test_flag_off_replay_cleanup_preflight_outranks_boundary_cooldown(
     monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
 
     assert engine.should_compress_preflight(messages) is True
-    assert engine._preflight_cleanup_only_due_to_boundary_cooldown is True
+    assert engine._preflight_cleanup_only is True
 
 
 def test_flag_off_replay_cleanup_cooldown_publishes_without_summary_llm(
@@ -414,6 +414,53 @@ def test_flag_off_replay_cleanup_cooldown_publishes_without_summary_llm(
     assert engine.last_compression_status == "sanitized"
     assert engine._dag.get_session_node_count(engine._session_id) == 0
     summary_spy.assert_not_called()
+
+
+def test_replay_cleanup_skips_summary_work_below_threshold_without_cooldown(
+    make_engine,
+    monkeypatch,
+):
+    """Regression: a stubbed tool result must not buy a full leaf pass.
+
+    The previous gate set the cleanup-only path ONLY during a boundary
+    cooldown, so a replay cleanup below the context threshold fell through to
+    the leaf-compaction loop and spent summarizer calls on a rewrite that was
+    already durable and deterministic.
+    """
+    engine = make_engine(large_output_active_replay_stubbing_enabled=False)
+    engine.threshold_tokens = 100_000
+    # The normal case: no boundary skip has happened this session.
+    assert engine._last_boundary_skip_time == 0
+    messages, cleanup_messages = externalized_raw_cleanup_messages()
+    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
+    summary_spy = Mock(
+        side_effect=AssertionError("sub-threshold replay cleanup must not summarize")
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summary_spy)
+
+    assert engine.should_compress_preflight(messages) is True
+    assert engine._preflight_cleanup_only is True
+
+    result = engine.compress(messages, current_tokens=1_000)
+
+    assert result == cleanup_messages
+    assert engine.last_compression_status == "sanitized"
+    assert engine._dag.get_session_node_count(engine._session_id) == 0
+    summary_spy.assert_not_called()
+
+
+def test_replay_cleanup_over_threshold_still_runs_leaf_compaction(
+    make_engine,
+    monkeypatch,
+):
+    """Over the threshold a replay cleanup must NOT suppress real compaction."""
+    engine = make_engine(large_output_active_replay_stubbing_enabled=False)
+    engine.threshold_tokens = 1
+    messages, cleanup_messages = externalized_raw_cleanup_messages()
+    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
+
+    assert engine.should_compress_preflight(messages) is True
+    assert engine._preflight_cleanup_only is False
 
 
 def test_flag_off_noncleanup_replay_diff_remains_blocked_during_cooldown(

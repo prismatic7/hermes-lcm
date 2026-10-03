@@ -68,7 +68,7 @@ class CompactionMixin:
 
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
-        self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._preflight_cleanup_only = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
@@ -129,11 +129,23 @@ class CompactionMixin:
                 messages=replay_messages,
             )
             if cleanup_requested:
-                if (
-                    not force_overflow_requested
-                    and self._compression_boundary_cooldown_active()
-                ):
-                    self._preflight_cleanup_only_due_to_boundary_cooldown = True
+                # Ingest just rewrote provider-visible messages into durable
+                # refs (externalization stub, sensitive redaction, or an
+                # active-replay placeholder). That rewrite is deterministic and
+                # needs no summarizer, so adopt it through the cleanup-only
+                # path — but ONLY when we can prove the turn is still below a
+                # known compaction threshold. With an unknown window
+                # (threshold_tokens == 0) or a real threshold/overflow breach,
+                # fall through to the normal compaction path. Gating this on
+                # boundary cooldown alone (the previous behaviour) meant every
+                # stubbed large tool result forced a full compaction with
+                # summarizer spend far below the context threshold.
+                below_known_threshold = (
+                    self.threshold_tokens > 0
+                    and max(rough, replay_rough) < self.threshold_tokens
+                )
+                if not force_overflow_requested and below_known_threshold:
+                    self._preflight_cleanup_only = True
                 return self._mark_preflight_compression_requested()
             if force_overflow_requested:
                 return self._mark_preflight_compression_requested()
@@ -428,12 +440,9 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
         ingest_cleanup_changed_active_context = working_messages != messages
-        cleanup_only_due_to_boundary_cooldown = bool(
-            self._preflight_cleanup_only_due_to_boundary_cooldown
-            and not force_overflow
-        )
-        self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        if cleanup_only_due_to_boundary_cooldown:
+        cleanup_only = bool(self._preflight_cleanup_only and not force_overflow)
+        self._preflight_cleanup_only = False
+        if cleanup_only:
             sanitized_messages = self._sanitize_active_context_messages(
                 working_messages,
                 insert_missing_tool_stubs=False,
